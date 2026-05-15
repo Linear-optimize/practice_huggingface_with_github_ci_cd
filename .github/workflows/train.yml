@@ -29,7 +29,7 @@ jobs:
       - name: Run Training
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_REPO: "your-username/distilbert-imdb" 
+          HF_REPO: "renePolychinski/distilbert-imdb" 
           DATA_FILE: "datasets/imdb_balanced_10k.csv"
         run: |
           # We force fp16=False because GitHub Runners don't support half-precision on CPU
