@@ -3,7 +3,7 @@ name: Train and Push to HF
 on:
   push:
     branches: [ master ]
-  workflow_dispatch: # Allows manual trigger
+  workflow_dispatch: 
 
 jobs:
   train:
@@ -29,7 +29,7 @@ jobs:
       - name: Run Training
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_REPO: "your-username/distilbert-imdb" # Replace with your repo
+          HF_REPO: "your-username/distilbert-imdb" 
           DATA_FILE: "datasets/imdb_balanced_10k.csv"
         run: |
           # We force fp16=False because GitHub Runners don't support half-precision on CPU
