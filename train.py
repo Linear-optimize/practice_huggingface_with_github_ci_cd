@@ -1,96 +1,61 @@
 import os
 import pandas as pd
 import numpy as np
+import torch
+import joblib
 from sklearn.model_selection import train_test_split
-from datasets import Dataset, DatasetDict
-from transformers import DistilBertTokenizerFast, DistilBertForSequenceClassification, Trainer, TrainingArguments, EarlyStoppingCallback
-import evaluate
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+from transformers import DistilBertTokenizerFast, DistilBertModel
+from tqdm import tqdm  # 引入进度条
 
-# ── Config ─────────────────────────────
-DATA_FILE  = os.getenv("DATA_FILE", "datasets/imdb_balanced_10k.csv")  
-MODEL_NAME = os.getenv("MODEL_NAME", "distilbert-base-uncased")
-OUTPUT_DIR = os.getenv("OUTPUT_DIR", "./distilbert-imdb")
-MAX_LENGTH = int(os.getenv("MAX_LENGTH", 512))
-BATCH_SIZE = int(os.getenv("BATCH_SIZE", 32))
-EPOCHS     = int(os.getenv("EPOCHS", 4))
-LR         = float(os.getenv("LR", 1e-5))
-HF_REPO    = os.getenv("HF_REPO") 
+# ── 1. 配置 ──
+DATA_FILE = os.getenv("DATA_FILE", "datasets/imdb_balanced_10k.csv")
 
-# ── Load dataset ───────────────────────
-print(f"Loading data from {DATA_FILE}...")
-df = pd.read_csv(DATA_FILE)[["text", "label"]].dropna()
-df["label"] = df["label"].astype(int)
-
-# ── Train/Val/Test split ──────────────
-train_df, test_df = train_test_split(df, test_size=0.1, random_state=42, stratify=df["label"])
-train_df, val_df  = train_test_split(train_df, test_size=0.1, random_state=42, stratify=train_df["label"])
-
-ds = DatasetDict({
-    "train": Dataset.from_pandas(train_df.reset_index(drop=True)),
-    "val":   Dataset.from_pandas(val_df.reset_index(drop=True)),
-    "test":  Dataset.from_pandas(test_df.reset_index(drop=True)),
-})
+IS_CI = os.getenv("GITHUB_ACTIONS") == "true"
+SAMPLE_SIZE = 1500 if IS_CI else 5000 
 
 
-tokenizer = DistilBertTokenizerFast.from_pretrained(MODEL_NAME)
-def tokenize(batch):
-    return tokenizer(batch["text"], truncation=True, padding="max_length", max_length=MAX_LENGTH)
+df = pd.read_csv(DATA_FILE).dropna()
+train_df, test_df = train_test_split(df, test_size=0.2, random_state=42)
 
-ds = ds.map(tokenize, batched=True, remove_columns=["text"])
-ds.set_format("torch")
+# ── 3. 提取特征 ──
+print(f"Loading model and tokenizer...")
+tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
+base_model = DistilBertModel.from_pretrained("distilbert-base-uncased")
+base_model.eval()
 
-# ── Model ───────────────────────────────
-model = DistilBertForSequenceClassification.from_pretrained(
-    MODEL_NAME,
-    num_labels=2,
-    id2label={0: "negative", 1: "positive"},
-    label2id={"negative": 0, "positive": 1},
-)
+def get_embeddings(text_list, desc="Progress"):
+    all_embeddings = []
+    batch_size = 8 # CPU 上 Batch 小一点更稳
+    subset = text_list[:SAMPLE_SIZE] 
+    
+    # 使用 tqdm 显示进度条
+    for i in tqdm(range(0, len(subset), batch_size), desc=desc):
+        batch = subset[i : i + batch_size]
+        inputs = tokenizer(batch, truncation=True, padding=True, max_length=128, return_tensors="pt")
+        with torch.no_grad():
+            outputs = base_model(**inputs)
+        # 提取 CLS 向量
+        all_embeddings.append(outputs.last_hidden_state[:, 0, :].numpy())
+    return np.vstack(all_embeddings)
 
-# ── Metrics ─────────────────────────────
-accuracy = evaluate.load("accuracy")
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    preds = np.argmax(logits, axis=-1)
-    return accuracy.compute(predictions=preds, references=labels)
+print("Starting feature extraction...")
+X_train = get_embeddings(train_df["text"].tolist(), desc="Training Features")
+y_train = train_df["label"].tolist()[:len(X_train)]
 
-# ── Training ────────────────────────────
-training_args = TrainingArguments(
-    output_dir=OUTPUT_DIR,
-    num_train_epochs=EPOCHS,
-    per_device_train_batch_size=BATCH_SIZE,
-    per_device_eval_batch_size=BATCH_SIZE,
-    learning_rate=LR,
-    weight_decay=0.01,
-    warmup_ratio=0.1,
-    eval_strategy="epoch",
-    save_strategy="epoch",
-    load_best_model_at_end=True,
-    metric_for_best_model="accuracy",
-    greater_is_better=True,
-    logging_steps=50,
-    report_to="none",
-    push_to_hub=HF_REPO is not None,
-    hub_model_id=HF_REPO,
-    fp16=True,
-)
+X_test = get_embeddings(test_df["text"].tolist(), desc="Testing Features")
+y_test = test_df["label"].tolist()[:len(X_test)]
 
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=ds["train"],
-    eval_dataset=ds["val"],
-    processing_class=tokenizer,
-    compute_metrics=compute_metrics,
-    callbacks=[EarlyStoppingCallback(early_stopping_patience=1)]
-)
+# ── 4. 训练与保存 ──
+print("Training Logistic Regression...")
+clf = LogisticRegression(max_iter=1000, C=1.0) # C=1.0 助于泛化
+clf.fit(X_train, y_train)
 
-trainer.train()
+acc = accuracy_score(y_test, clf.predict(X_test))
+print(f"✅ Final Test Accuracy: {acc:.4f}")
 
-# ── Evaluate & Push ─────────────────────
-results = trainer.evaluate(ds["test"])
-acc = results.get("eval_accuracy", 0)
-print(f"Test Accuracy: {acc:.4f}")
-
-if HF_REPO:
-    trainer.push_to_hub(commit_message=f"Fine-tuned DistilBERT | acc={acc:.4f}")
+# 保存结果供 YAML 推送使用
+joblib.dump(clf, "model.joblib")
+with open("accuracy.txt", "w") as f:
+    f.write(f"{acc:.4f}")

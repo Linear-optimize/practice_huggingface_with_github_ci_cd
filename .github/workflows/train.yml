@@ -23,14 +23,59 @@ jobs:
       - name: Install dependencies
         run: |
           uv sync
-          # Ensure accelerate and torch are ready for CPU-only environment
-          uv pip install accelerate
+          # 必须安装这些库，否则推送步骤会失败
+          uv pip install huggingface_hub joblib scikit-learn torch transformers tqdm
 
       - name: Run Training
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_REPO: "renePolychinski/distilbert-imdb" 
           DATA_FILE: "datasets/imdb_balanced_10k.csv"
         run: |
-          # We force fp16=False because GitHub Runners don't support half-precision on CPU
+          # 运行你那个带 tqdm 进度条的新版 train.py
           uv run python train.py
+
+      - name: Push to Hugging Face Hub
+        if: success() # 只有训练成功（生成了 model.joblib）才执行推送
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # 记得把这里改成你真实的 HF 用户名/仓库名
+          HF_REPO: "renePolychinski/distilbert-imdb" 
+        run: |
+          # 直接在 Shell 中调用 Python 进行推送，简单透明
+          python - <<EOF
+          import os
+          from huggingface_hub import HfApi, login
+          
+          token = os.getenv("HF_TOKEN")
+          repo_id = os.getenv("HF_REPO")
+          
+          if not token:
+              print("❌ Error: HF_TOKEN is missing!")
+              exit(1)
+          
+          login(token=token)
+          api = HfApi()
+          
+          print(f"🚀 Initializing repo: {repo_id}")
+          api.create_repo(repo_id=repo_id, exist_ok=True)
+          
+          # 上传模型文件
+          if os.path.exists("model.joblib"):
+              print("📦 Uploading model.joblib...")
+              api.upload_file(
+                  path_or_fileobj="model.joblib",
+                  path_in_repo="model.joblib",
+                  repo_id=repo_id
+              )
+          
+          # 自动生成并上传 README
+          acc = "Unknown"
+          if os.path.exists("accuracy.txt"):
+              with open("accuracy.txt", "r") as f:
+                  acc = f.read().strip()
+          
+          with open("README.md", "w") as f:
+              f.write(f"# IMDB Sentiment Classifier\n\n- **Model Type**: Logistic Regression (DistilBERT Embeddings)\n- **Accuracy**: {acc}\n- **Environment**: GitHub Actions CPU")
+          
+          api.upload_file(path_or_fileobj="README.md", path_in_repo="README.md", repo_id=repo_id)
+          print("✨ Successfully pushed to Hugging Face!")
+          EOF
