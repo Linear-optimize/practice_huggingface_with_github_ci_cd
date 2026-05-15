@@ -2,7 +2,7 @@ name: Train and Push to HF
 
 on:
   push:
-    branches: [ main ]
+    branches: [ master ]
   workflow_dispatch: # Allows manual trigger
 
 jobs:
