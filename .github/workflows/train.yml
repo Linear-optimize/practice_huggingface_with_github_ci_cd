@@ -2,7 +2,7 @@ name: Model CD - Sync to HF
 
 on:
   push:
-    branches: [ master ]
+    branches: [ main ]
     # 只有当模型文件或准确率文件更新时才触发，节省 Actions 时间
     paths:
       - 'model.joblib'
