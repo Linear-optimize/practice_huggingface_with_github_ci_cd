@@ -1,0 +1,4 @@
+huggingface-hub
+scikit-learn
+torch
+torchvision

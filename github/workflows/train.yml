@@ -1,0 +1,36 @@
+name: Train and Push to HF
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: |
+          uv sync
+          # Ensure accelerate and torch are ready for CPU-only environment
+          uv pip install accelerate
+
+      - name: Run Training
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_REPO: "your-username/distilbert-imdb" # Replace with your repo
+          DATA_FILE: "datasets/imdb_balanced_10k.csv"
+        run: |
+          # We force fp16=False because GitHub Runners don't support half-precision on CPU
+          uv run python train.py
