@@ -13,7 +13,7 @@ dependencies = [
     "torch>=2.12.0",
     "torchvision>=0.27.0",
     "tqdm>=4.67.3",
-    "transformers[torch]",
+    "transformers[sentencepiece,torch]",
 ]
 
 [[tool.uv.index]]
@@ -30,3 +30,4 @@ default = true
 torch = { index = "pytorch" }
 torchvision = { index = "pytorch" }
 
+   

@@ -1,91 +1,80 @@
-name: Train and Push to HF
+name: Model CD - Sync to HF
 
 on:
   push:
     branches: [ master ]
-  workflow_dispatch: 
+    # 只有当模型文件或准确率文件更新时才触发，节省 Actions 时间
+    paths:
+      - 'model.joblib'
+      - 'accuracy.txt'
 
 jobs:
-  train:
+  publish:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
         with:
-          enable-cache: true
+          lfs: true # 如果你的 model.joblib 很大，记得开启 LFS
 
       - name: Set up Python
-        run: uv python install 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          uv sync
-          # 在 uv 虚拟环境中安装所有必需的库
-          uv pip install huggingface_hub joblib scikit-learn torch transformers tqdm
-
-      - name: Run Training
-        env:
-          # 告知脚本在 CI 环境运行以自动调整 SAMPLE_SIZE
-          GITHUB_ACTIONS: "true" 
-          DATA_FILE: "datasets/imdb_balanced_10k.csv"
-        run: |
-          # 运行新版冲击 0.92 的 train.py
-          uv run python train.py
+      - name: Install HF Tool
+        run: pip install huggingface_hub
 
       - name: Push to Hugging Face Hub
-        if: success() 
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          # 请务必确认这是你真正的 HF 用户名
-          HF_REPO: "renePolychinski/distilbert-imdb" 
+          HF_REPO: "renePolychinski/distilbert-imdb"
         run: |
-          # 关键修改：使用 uv run 确保能找到 huggingface_hub 库
-          uv run python - <<EOF
+          python - <<EOF
           import os
           from huggingface_hub import HfApi, login
           
           token = os.getenv("HF_TOKEN")
           repo_id = os.getenv("HF_REPO")
           
-          if not token:
-              print("❌ Error: HF_TOKEN is missing in Secrets!")
+          if not os.path.exists("model.joblib"):
+              print("❌ 错误: 未在仓库中找到 model.joblib，请先在本地训练并提交文件。")
               exit(1)
           
           login(token=token)
           api = HfApi()
           
-          print(f"🚀 Initializing repo: {repo_id}")
           api.create_repo(repo_id=repo_id, exist_ok=True)
           
-          # 上传模型文件
-          if os.path.exists("model.joblib"):
-              print("📦 Uploading model.joblib...")
-              api.upload_file(
-                  path_or_fileobj="model.joblib",
-                  path_in_repo="model.joblib",
-                  repo_id=repo_id
-              )
-          
-          # 读取准确率并生成 README
+          # 获取本地准确率写进 README
           acc = "Unknown"
           if os.path.exists("accuracy.txt"):
               with open("accuracy.txt", "r") as f:
                   acc = f.read().strip()
+
+          # 生成带元数据的 Model Card (解决你之前的 YAML Warning)
+          readme_content = f"""---
+          language: en
+          license: mit
+          tags:
+          - text-classification
+          - imdb
+          metrics:
+          - accuracy
+          ---
+          # IMDB Sentiment Classifier
           
-          readme_content = f"""# IMDB Sentiment Classifier
-          
-          - **Model Type**: Logistic Regression (DistilBERT Embeddings)
           - **Accuracy**: {acc}
-          - **Environment**: GitHub Actions CPU
-          - **Status**: Automated CI/CD Deployment
+          - **Status**: Verified Local Training, Automated CD Deployment.
           """
-          
           with open("README.md", "w") as f:
               f.write(readme_content)
+
+          # 上传
+          for file in ["model.joblib", "README.md", "accuracy.txt"]:
+              if os.path.exists(file):
+                  print(f"Uploading {file}...")
+                  api.upload_file(path_or_fileobj=file, path_in_repo=file, repo_id=repo_id)
           
-          api.upload_file(path_or_fileobj="README.md", path_in_repo="README.md", repo_id=repo_id)
-          print(f"✨ Successfully pushed to Hugging Face! Accuracy was: {acc}")
+          print("✨ 模型已同步至 Hugging Face！")
           EOF
