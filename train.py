@@ -7,55 +7,69 @@ from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score
 from transformers import DistilBertTokenizerFast, DistilBertModel
-from tqdm import tqdm  # 引入进度条
+from tqdm import tqdm
 
 # ── 1. 配置 ──
 DATA_FILE = os.getenv("DATA_FILE", "datasets/imdb_balanced_10k.csv")
-
 IS_CI = os.getenv("GITHUB_ACTIONS") == "true"
-SAMPLE_SIZE = 1500 if IS_CI else 5000 
 
+# 冲击 0.92 的核心：增加样本量
+# CPU 提取 3000 条特征大约需要 8 分钟，建议作为 CI 的上限
+SAMPLE_SIZE = 3000 if IS_CI else 8000 
+MAX_LEN = 256  # 从 128 提升到 256，捕捉更多语义信息
 
+# ── 2. 加载数据 ──
 df = pd.read_csv(DATA_FILE).dropna()
-train_df, test_df = train_test_split(df, test_size=0.2, random_state=42)
+# 确保标签是数值
+df['label'] = df['label'].astype(int)
+
+train_df, test_df = train_test_split(df, test_size=0.2, random_state=42, stratify=df['label'])
 
 # ── 3. 提取特征 ──
-print(f"Loading model and tokenizer...")
+print(f"Loading DistilBERT for feature extraction (MAX_LEN={MAX_LEN})...")
 tokenizer = DistilBertTokenizerFast.from_pretrained("distilbert-base-uncased")
 base_model = DistilBertModel.from_pretrained("distilbert-base-uncased")
 base_model.eval()
 
 def get_embeddings(text_list, desc="Progress"):
     all_embeddings = []
-    batch_size = 8 # CPU 上 Batch 小一点更稳
+    batch_size = 8 
+    # 限制处理数量
     subset = text_list[:SAMPLE_SIZE] 
     
-    # 使用 tqdm 显示进度条
     for i in tqdm(range(0, len(subset), batch_size), desc=desc):
         batch = subset[i : i + batch_size]
-        inputs = tokenizer(batch, truncation=True, padding=True, max_length=128, return_tensors="pt")
+        inputs = tokenizer(
+            batch, 
+            truncation=True, 
+            padding="max_length", 
+            max_length=MAX_LEN, 
+            return_tensors="pt"
+        )
         with torch.no_grad():
             outputs = base_model(**inputs)
-        # 提取 CLS 向量
-        all_embeddings.append(outputs.last_hidden_state[:, 0, :].numpy())
+        # 取 [CLS] 向量作为句子表示
+        embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
+        all_embeddings.append(embeddings)
     return np.vstack(all_embeddings)
 
-print("Starting feature extraction...")
-X_train = get_embeddings(train_df["text"].tolist(), desc="Training Features")
+print("Extracting features (This might take a few minutes on CPU)...")
+X_train = get_embeddings(train_df["text"].tolist(), desc="Train-Set")
 y_train = train_df["label"].tolist()[:len(X_train)]
 
-X_test = get_embeddings(test_df["text"].tolist(), desc="Testing Features")
+X_test = get_embeddings(test_df["text"].tolist(), desc="Test-Set")
 y_test = test_df["label"].tolist()[:len(X_test)]
 
-# ── 4. 训练与保存 ──
-print("Training Logistic Regression...")
-clf = LogisticRegression(max_iter=1000, C=1.0) # C=1.0 助于泛化
+# ── 4. 训练分类器 ──
+print(f"Training Classifier on {len(X_train)} samples...")
+# 使用 liblinear 引擎对小样本更友好，增加 C 值减少正则化
+clf = LogisticRegression(max_iter=2000, C=2.0, solver='liblinear')
 clf.fit(X_train, y_train)
 
 acc = accuracy_score(y_test, clf.predict(X_test))
-print(f"✅ Final Test Accuracy: {acc:.4f}")
+print(f"🔥 Final Test Accuracy: {acc:.4f}")
 
-# 保存结果供 YAML 推送使用
+# ── 5. 保存结果 ──
 joblib.dump(clf, "model.joblib")
 with open("accuracy.txt", "w") as f:
     f.write(f"{acc:.4f}")
